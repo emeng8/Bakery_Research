@@ -1,6 +1,5 @@
 import pyodbc
 import pandas as pd
-import sys
 from pytrends.request import TrendReq
 
 # 1) Full list of 20 keywords
@@ -12,68 +11,83 @@ SEARCH_TERMS = [
 ]
 
 def chunk_keywords(keywords, chunk_size=5):
-    """ Splits a list of keywords into sub-lists (chunks) of size 'chunk_size'. """
+    """
+    Splits a list of keywords into sub-lists (chunks) of size 'chunk_size'.
+    Prints debug info about chunking.
+    """
+    print("[DEBUG] Entering chunk_keywords function...")
+    print(f"[DEBUG] chunk_size = {chunk_size}, total keywords = {len(keywords)}")
     for i in range(0, len(keywords), chunk_size):
-        yield keywords[i : i + chunk_size]
+        chunk = keywords[i : i + chunk_size]
+        print(f"[DEBUG] Yielding chunk: {chunk}")
+        yield chunk
 
 def get_trends_single_chunk(keyword_chunk, timeframe='today 12-m', geo='US-CA'):
     """
     Calls Google Trends for a single chunk (<=5 keywords).
     Returns a DataFrame with interest_over_time() data.
+    Prints debug info about the request and response.
     """
+    print("[DEBUG] Entering get_trends_single_chunk function...")
+    print(f"[DEBUG] Keyword chunk: {keyword_chunk}")
+    print(f"[DEBUG] timeframe = {timeframe}, geo = {geo}")
+
     pytrends = TrendReq(hl='en-US', tz=360)
+    print("[DEBUG] Building payload with PyTrends...")
     pytrends.build_payload(keyword_chunk, timeframe=timeframe, geo=geo)
+    print("[DEBUG] Payload built. Now fetching interest_over_time...")
+
     df = pytrends.interest_over_time()
+    print("[DEBUG] interest_over_time() returned a DataFrame of shape:", df.shape)
 
     # Drop 'isPartial' if it exists
     if 'isPartial' in df.columns:
         df.drop(columns=['isPartial'], inplace=True)
+        print("[DEBUG] 'isPartial' column dropped.")
 
     return df
 
 def insert_trends_into_sql(df):
     """
     Inserts the single-chunk DataFrame into SQL. 
-    Adjust your table columns as needed for all keywords in that chunk.
+    This example assumes your table has columns named '<keyword>_score' 
+    plus 'trend_date' and 'last_updated'.
     """
+    print("[DEBUG] Entering insert_trends_into_sql function...")
+    print("[DEBUG] DataFrame shape:", df.shape)
+
     conn_str = (
         "Driver={ODBC Driver 17 for SQL Server};"
         "Server=localhost;"
         "Database=Bakery_Research;"
         "Trusted_Connection=yes;"
     )
+    print("[DEBUG] Connecting to SQL Server with connection string:", conn_str)
     conn = pyodbc.connect(conn_str)
     cursor = conn.cursor()
+    print("[DEBUG] Connection successful. Beginning insertion row-by-row...")
 
+    # For each date row in df
     for date_idx, row in df.iterrows():
         trend_date = date_idx.strftime('%Y-%m-%d')
-        
-        # Collect any columns we might have in 'row':
-        # Because each chunk can have up to 5 columns, let's dynamically handle them.
-        # Example approach: insert columns by name.
-        # If you have 5 specific columns in each chunk, you can do a custom insert. 
-        # We'll do a quick example assuming we know them.
 
-        columns = list(df.columns)  # e.g. ["taro", "black sesame", ...]
+        # The columns in this chunk's DataFrame
+        columns = list(df.columns)  
+        print(f"[DEBUG] Inserting row for date {trend_date} with columns: {columns}")
+
         # Build the partial SQL for columns
+        # e.g. if columns=["taro", "black sesame"], 
+        # we'll have col_names="taro_score, black_sesame_score"
         col_names = ", ".join([col.replace(" ", "_") + "_score" for col in columns])
-        # e.g. "taro_score, black_sesame_score"
 
-        # Build placeholders for values (the integer scores)
+        # Build the values string (the integer scores)
         col_values = []
         for col in columns:
             val = int(row.get(col, 0))
             col_values.append(str(val))
         values_str = ", ".join(col_values)
 
-        # We'll assume your table has columns named like "taro_score" if col="taro"
-        # If your table has 20 static columns, you could do a partial insert or an update approach.
-        # For demonstration, let's do a generic approach. 
-        # We require that your table can accept NULL or skip columns for those not present in this chunk.
-
-        # If you're specifically storing all 20 columns, you might do a partial update or have 20 columns all the time.
-        # But for clarity, let's do a single-chunk approach with a custom table or a dynamic approach.
-
+        # Construct the INSERT statement
         insert_sql = f"""
         INSERT INTO TrendingFlavorsAndPastries (
             trend_date,
@@ -86,45 +100,43 @@ def insert_trends_into_sql(df):
             GETDATE()
         );
         """
+
+        print(f"[DEBUG] Executing SQL: {insert_sql}")
         cursor.execute(insert_sql)
 
     conn.commit()
     conn.close()
-    print("Data inserted for this chunk!")
+    print("[DEBUG] Data insertion complete. Connection closed.")
 
 def main():
     # 1) Break all 20 keywords into chunks of 5
+    print("[DEBUG] Starting main function. Generating chunks...")
     chunks = list(chunk_keywords(SEARCH_TERMS, 5))
     total_chunks = len(chunks)
+    print(f"[DEBUG] Total chunks created: {total_chunks}")
 
-    # 2) Determine which chunk index to run (e.g. pass as script arg)
-    if len(sys.argv) < 2:
-        print(f"Usage: python {sys.argv[0]} <CHUNK_INDEX>")
-        print(f"Valid chunk indexes: 0 to {total_chunks-1}")
-        return
-    
-    chunk_index = int(sys.argv[1])
-    if chunk_index < 0 or chunk_index >= total_chunks:
-        print(f"Invalid chunk index. Must be between 0 and {total_chunks-1}.")
-        return
-
+    # 2) We will ALWAYS run just chunk index 0 in this script
+    chunk_index = 0
+    print(f"[DEBUG] We are going to run ONLY chunk index {chunk_index}.")
     chunk = chunks[chunk_index]
-    print(f"Running chunk #{chunk_index} with keywords: {chunk}")
+    print(f"[DEBUG] Chunk #{chunk_index} = {chunk}")
 
     # 3) Fetch data for this single chunk
     try:
         df_chunk = get_trends_single_chunk(chunk, timeframe='today 12-m', geo='US-CA')
     except Exception as e:
-        print("Error fetching trends:", e)
+        print("[ERROR] Exception while fetching trends:", e)
         return
 
     if df_chunk.empty:
-        print("No data returned or blocked by Google for this chunk.")
+        print("[DEBUG] No data returned or blocked by Google for this chunk. Exiting.")
         return
 
     # 4) Insert data into SQL
     insert_trends_into_sql(df_chunk)
-    print(f"Chunk {chunk_index} complete. Run again for the next chunk if desired.")
+    print(f"[DEBUG] Done processing chunk index {chunk_index}.")
 
 if __name__ == "__main__":
+    print("[DEBUG] Script started. Calling main()...")
     main()
+    print("[DEBUG] Script finished.")
