@@ -1,9 +1,9 @@
 import pyodbc
 import pandas as pd
+import sys
 from pytrends.request import TrendReq
-from datetime import datetime
 
-# ----- 1) Define your flavors & pastries including new ones -----
+# 1) Full list of 20 keywords
 SEARCH_TERMS = [
     "taro", "black sesame", "matcha", "hojicha", "gochujang",
     "pandan", "ube", "coconut", "miso", "ginger",
@@ -12,128 +12,77 @@ SEARCH_TERMS = [
 ]
 
 def chunk_keywords(keywords, chunk_size=5):
+    """ Splits a list of keywords into sub-lists (chunks) of size 'chunk_size'. """
     for i in range(0, len(keywords), chunk_size):
         yield keywords[i : i + chunk_size]
 
-chunks = list(chunk_keywords(SEARCH_TERMS, 5))
-print("Keyword chunks:", chunks)
-
-
-def get_trends_chunked(chunks, timeframe='today 12-m', geo='US-CA-803'):
+def get_trends_single_chunk(keyword_chunk, timeframe='today 12-m', geo='US-CA'):
+    """
+    Calls Google Trends for a single chunk (<=5 keywords).
+    Returns a DataFrame with interest_over_time() data.
+    """
     pytrends = TrendReq(hl='en-US', tz=360)
-    final_df = pd.DataFrame()
+    pytrends.build_payload(keyword_chunk, timeframe=timeframe, geo=geo)
+    df = pytrends.interest_over_time()
 
-    for chunk in chunks:
-        print(f"Building payload for chunk: {chunk}")
-        pytrends.build_payload(kw_list=chunk, timeframe=timeframe, geo=geo)
-        df_chunk = pytrends.interest_over_time()
+    # Drop 'isPartial' if it exists
+    if 'isPartial' in df.columns:
+        df.drop(columns=['isPartial'], inplace=True)
 
-        # Remove isPartial if present
-        if 'isPartial' in df_chunk.columns:
-            df_chunk.drop(columns=['isPartial'], inplace=True)
-
-        # If final_df is empty, just take df_chunk
-        if final_df.empty:
-            final_df = df_chunk
-        else:
-            # Merge on the date index
-            final_df = final_df.join(df_chunk, how='outer')
-    
-    return final_df
-
-chunks = list(chunk_keywords(SEARCH_TERMS, 5))
-df_trends = get_trends_chunked(chunks, timeframe='today 12-m', geo='US-CA-803')
-print(df_trends.head())
-
+    return df
 
 def insert_trends_into_sql(df):
     """
-    Inserts Google Trends data into the TrendingFlavorsAndPastries table.
-    df columns will be each search term. 
-    The index is a datetime (each row is a specific date/week).
+    Inserts the single-chunk DataFrame into SQL. 
+    Adjust your table columns as needed for all keywords in that chunk.
     """
     conn_str = (
         "Driver={ODBC Driver 17 for SQL Server};"
-        "Server=localhost;"  # or your server name/instance
+        "Server=localhost;"
         "Database=Bakery_Research;"
         "Trusted_Connection=yes;"
     )
     conn = pyodbc.connect(conn_str)
     cursor = conn.cursor()
 
-    # Iterate each row in df and build INSERT statement
     for date_idx, row in df.iterrows():
         trend_date = date_idx.strftime('%Y-%m-%d')
         
-        # Safely retrieve each search term's score, defaulting to 0
-        taro_score            = int(row.get("taro", 0))
-        black_sesame_score    = int(row.get("black sesame", 0))
-        matcha_score          = int(row.get("matcha", 0))
-        hojicha_score         = int(row.get("hojicha", 0))
-        gochujang_score       = int(row.get("gochujang", 0))
-        pandan_score          = int(row.get("pandan", 0))
-        ube_score             = int(row.get("ube", 0))
-        coconut_score         = int(row.get("coconut", 0))
-        miso_score            = int(row.get("miso", 0))
-        ginger_score          = int(row.get("ginger", 0))
-        lemongrass_score      = int(row.get("lemongrass", 0))
-        sesame_score          = int(row.get("sesame", 0))
-        croissants_score      = int(row.get("croissants", 0))
-        shokupan_score        = int(row.get("shokupan", 0))
-        kouign_amann_score    = int(row.get("kouign amann", 0))
-        milk_tea_score        = int(row.get("milk tea", 0))
-        mooncake_score        = int(row.get("mooncake", 0))
-        taiyaki_score         = int(row.get("taiyaki", 0))
-        egg_tart_score        = int(row.get("egg tart", 0))
-        red_bean_score        = int(row.get("red bean", 0))
+        # Collect any columns we might have in 'row':
+        # Because each chunk can have up to 5 columns, let's dynamically handle them.
+        # Example approach: insert columns by name.
+        # If you have 5 specific columns in each chunk, you can do a custom insert. 
+        # We'll do a quick example assuming we know them.
+
+        columns = list(df.columns)  # e.g. ["taro", "black sesame", ...]
+        # Build the partial SQL for columns
+        col_names = ", ".join([col.replace(" ", "_") + "_score" for col in columns])
+        # e.g. "taro_score, black_sesame_score"
+
+        # Build placeholders for values (the integer scores)
+        col_values = []
+        for col in columns:
+            val = int(row.get(col, 0))
+            col_values.append(str(val))
+        values_str = ", ".join(col_values)
+
+        # We'll assume your table has columns named like "taro_score" if col="taro"
+        # If your table has 20 static columns, you could do a partial insert or an update approach.
+        # For demonstration, let's do a generic approach. 
+        # We require that your table can accept NULL or skip columns for those not present in this chunk.
+
+        # If you're specifically storing all 20 columns, you might do a partial update or have 20 columns all the time.
+        # But for clarity, let's do a single-chunk approach with a custom table or a dynamic approach.
 
         insert_sql = f"""
-        INSERT INTO dbo.TrendingFlavorsAndPastries (
+        INSERT INTO TrendingFlavorsAndPastries (
             trend_date,
-            taro_score,
-            black_sesame_score,
-            matcha_score,
-            hojicha_score,
-            gochujang_score,
-            pandan_score,
-            ube_score,
-            coconut_score,
-            miso_score,
-            ginger_score,
-            lemongrass_score,
-            sesame_score,
-            croissants_score,
-            shokupan_score,
-            kouign_amann_score,
-            milk_tea_score,
-            mooncake_score,
-            taiyaki_score,
-            egg_tart_score,
-            red_bean_score,
+            {col_names},
             last_updated
         )
         VALUES (
             '{trend_date}',
-            {taro_score},
-            {black_sesame_score},
-            {matcha_score},
-            {hojicha_score},
-            {gochujang_score},
-            {pandan_score},
-            {ube_score},
-            {coconut_score},
-            {miso_score},
-            {ginger_score},
-            {lemongrass_score},
-            {sesame_score},
-            {croissants_score},
-            {shokupan_score},
-            {kouign_amann_score},
-            {milk_tea_score},
-            {mooncake_score},
-            {taiyaki_score},
-            {egg_tart_score},
-            {red_bean_score},
+            {values_str},
             GETDATE()
         );
         """
@@ -141,33 +90,41 @@ def insert_trends_into_sql(df):
 
     conn.commit()
     conn.close()
-    print("Data successfully inserted into SQL!")
-
+    print("Data inserted for this chunk!")
 
 def main():
-    # 1) Create chunks of keywords (5 each)
+    # 1) Break all 20 keywords into chunks of 5
     chunks = list(chunk_keywords(SEARCH_TERMS, 5))
+    total_chunks = len(chunks)
 
-    # 2) Attempt to fetch LA region data with chunking
-    # If 'US-CA-803' fails, fallback to 'US-CA'
-    try:
-        df_trends = get_trends_chunked(chunks, timeframe='today 12-m', geo='US-CA-803')
-        if df_trends.empty:
-            print("No data for 'US-CA-803'. Retrying with 'US-CA'.")
-            df_trends = get_trends_chunked(chunks, timeframe='today 12-m', geo='US-CA')
-    except Exception as e:
-        print("Error with 'US-CA-803':", e)
-        print("Retrying with 'US-CA'.")
-        df_trends = get_trends_chunked(chunks, timeframe='today 12-m', geo='US-CA')
-
-    print("Final DataFrame shape:", df_trends.shape)
-    if df_trends.empty:
-        print("No data returned from PyTrends. Check your keywords or parameters.")
+    # 2) Determine which chunk index to run (e.g. pass as script arg)
+    if len(sys.argv) < 2:
+        print(f"Usage: python {sys.argv[0]} <CHUNK_INDEX>")
+        print(f"Valid chunk indexes: 0 to {total_chunks-1}")
+        return
+    
+    chunk_index = int(sys.argv[1])
+    if chunk_index < 0 or chunk_index >= total_chunks:
+        print(f"Invalid chunk index. Must be between 0 and {total_chunks-1}.")
         return
 
-    # 3) Insert to SQL
-    insert_trends_into_sql(df_trends)
-    print("Done!")
+    chunk = chunks[chunk_index]
+    print(f"Running chunk #{chunk_index} with keywords: {chunk}")
+
+    # 3) Fetch data for this single chunk
+    try:
+        df_chunk = get_trends_single_chunk(chunk, timeframe='today 12-m', geo='US-CA')
+    except Exception as e:
+        print("Error fetching trends:", e)
+        return
+
+    if df_chunk.empty:
+        print("No data returned or blocked by Google for this chunk.")
+        return
+
+    # 4) Insert data into SQL
+    insert_trends_into_sql(df_chunk)
+    print(f"Chunk {chunk_index} complete. Run again for the next chunk if desired.")
 
 if __name__ == "__main__":
     main()
